@@ -23,7 +23,7 @@ class InertialHMM(object):
     '''       Initialization       '''
     '''****************************'''
 
-    def __init__(self, number_of_states, sequence, regularization_mode = 0):        
+    def __init__(self, number_of_states, sequence, regularization_mode = 0, window_width=30):        
         self.num_states = number_of_states
         emission_means, emission_covariances = self.get_kmeans_emission_init(sequence)
         self.emission_density_objs = [multivariate_normal(mean=emission_means[k], cov=emission_covariances[k]) for k in range(number_of_states)]
@@ -44,6 +44,9 @@ class InertialHMM(object):
         self.current_avg_ll = None
         self.log_likelihood = float('-inf')
         self.t = 0
+        self.data_buffer = []
+        self.previous_state = -1
+        self.window_width = window_width
 
     def get_random_start_and_trans_probs(self):
         K = self.num_states
@@ -234,8 +237,8 @@ class InertialHMM(object):
     '''    Decode (Viterbi)    '''
     '''************************'''
       
-    def decode(self, sequence):
-        ''' Implements the Viterbi Algorithm '''
+    def decode(self, sequence, previous_state=-1):
+        ''' Implements a modified Viterbi Algorithm '''
         T = len(sequence)
         K = self.num_states
         x = sequence
@@ -245,6 +248,9 @@ class InertialHMM(object):
         if not np.all(start_probs):
             start_probs += 1e-20
             start_probs /= start_probs.sum()
+        if previous_state != -1:
+            ''' make start probs mass the transition prob from previous state to new state '''
+            start_probs = self.trans_probs[previous_state][:] 
         for k in range(K):
             V_table[0][k] = self.get_log_emission_prob(k, x[0]) + np.log(start_probs[k])
         backpointers[0,:] = -1
@@ -290,6 +296,8 @@ class InertialHMM(object):
             self.update_start_probs()
             self.trans_update_method(sequence, zeta)
             self.update_emission_parameters(sequence)
+        ''' Get state of last element '''
+        self.previous_state = decode(sequence)[:-1]
   
     def get_segments(self, state_assignments):
         segments = []
@@ -399,7 +407,25 @@ class InertialHMM(object):
         self.prev_gamma_sums = self.current_gamma_sums
         self.prev_emission_means = emission_means
         self.prev_emission_covariances = emission_covariances
-        
+        ''' Append data point to data buffer '''
+        self.data_buffer.append(x_t)
+
+    def predict_state(self):
+        ''' Only predict if we have enough items in buffer '''
+        if len(data_buffer) < self.window_length:
+            return -1
+        ''' Predict next position in data buffer '''
+        sequence = np.array(self.data_buffer)
+        states = decode(sequence, self.previous_state)
+        self.previous_state = states[0]
+        ''' Remove predicted data item off of front of data buffer '''
+        self.data_buffer.pop(0)
+        return states[0]
+
+    def increment_and_predict_state(self, x_t, zeta=1.0):
+        self.increment(x_t, zeta)
+        return self.predict_state()
+
 if __name__ == "__main__":
     '''*****************'''
     ''' Minimal Example '''
