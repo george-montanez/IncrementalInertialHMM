@@ -7,6 +7,7 @@ from gini import GRLC
 MIN_START_PROB = 1e-200
 MIN_TRANS_PROB = 1e-200
 MIN_ALPHA_BETA = 1e-250
+MIN_D2_VAL = 1e-200
 MIN_COV_VAL = 1e-2
 MAX_ITER = 10
 MIN_GINI = .5
@@ -40,7 +41,7 @@ class InertialHMM(object):
         self.alpha_table = None
         self.beta_table = None
         self.gamma_table = None
-        self.xi_table = None
+        self.xi_table = None    
         self.current_avg_ll = None
         self.log_likelihood = float('-inf')
         self.t = 0
@@ -323,7 +324,7 @@ class InertialHMM(object):
         return res[1]
 
     def learn_param_free(self, sequence, param_range=[1,10], only_final_ll=False):
-        epsilon = 0.01
+        epsilon = 0.1
         p = np.mean(param_range)
         print "Parameter:", p
         self.learn(sequence, zeta=p, init=True, only_final_ll=only_final_ll)
@@ -349,78 +350,85 @@ class InertialHMM(object):
         self.t += 1
         K = self.num_states
         self.current_alpha_vector = np.zeros(K)
-        self.current_xi_matrix = np.zeros(size=(K,K))
+        self.current_xi_matrix = np.zeros(shape=(K,K))
         self.current_gamma_vector = np.zeros(K)
         self.current_gamma_sums = np.zeros(K)
         self.current_D_vector = np.zeros(K)
-        new_A_matrix = np.zeros(size=(K,K))
-        ''' Define empty values '''
-        if self.prev_alpha_vector is None:
-            self.prev_alpha_vector = self.alpha_table[:,-1] 
-            print self.alpha_table[:,-1] * np.prod(self.scaling_factors)
-        if self.prev_gamma_sums is None:
-           self.prev_gamma_sums = np.zeros(K)         
-        ''' Current alpha values '''
-        for j in range(K):
-            self.current_alpha_vector[j] = np.sum([self.prev_alpha_vector[i] * self.trans_probs[i][j] for i in range(K)]) * \
-                    self.get_emission_prob(j, x_t)
-        ''' Current Xi values '''
-        for i in range(K):
+        new_A_matrix = np.zeros(shape=(K,K))
+        if self.t == 1:
+            ''' Initialize values for T=1 step '''
+            self.prev_alpha_vector = np.zeros(K)
             for j in range(K):
-                self.current_xi_matrix[i][j] = (self.prev_alpha_vector[i] * self.get_emission_prob(j, x_t) * \
-                        self.trans_probs[i][j]) / self.current_alpha_vector.sum()
-        ''' A matrix update '''         
-        if self.t == 2:
-            for i in range(K):
-                self.current_D_vector[i] = self.current_xi_matrix[i,:].sum()
-            for i in range(K):
-                for j in range(K):
-                    self.trans_probs[i][j] = self.current_xi_matrix[i][j] / self.current_D_vector[i]
-        else:
-            amped_value = ((self.t - 1)**zeta - (self.t - 2)**zeta)
-            for i in range(K):
-                self.current_D_vector[i] = amped_value + self.current_xi_matrix[i,:].sum() + self.prev_D_vector[i]
+                self.prev_alpha_vector[j] = self.start_probs[j] * self.get_emission_prob(j, x_t)
+            self.prev_gamma_sums = np.zeros(K)
+        else: 
+            ''' Current alpha values '''
+            for j in range(K):
+                self.current_alpha_vector[j] = np.sum([self.prev_alpha_vector[i] * self.trans_probs[i][j] for i in range(K)]) * \
+                        self.get_emission_prob(j, x_t)
+            ''' Current Xi values '''
             for i in range(K):
                 for j in range(K):
-                    av = amped_value if i == j else 0.
-                    last_part = self.prev_D_vector[i] * self.trans_probs[i][j]
-                    new_A_matrix[i][j] = (self.current_xi_matrix[i][j] + av + last_part) / self.current_D_vector[i]
-            self.trans_probs = new_A_matrix
-        ''' Current gamma values '''
-        self.current_gamma_vector = self.current_alpha_vector[:] / self.current_alpha_vector.sum()
-        self.current_gamma_sums = self.current_gamma_vector + self.prev_gamma_sums
-        ''' Update emission parameters '''
-        coeffs_a = self.prev_gamma_sums / self.current_gamma_sums
-        coeffs_b = self.current_gamma_vector / self.current_gamma_sums
-        emission_means = []
-        emission_covariances = []
-        for j in range(K):
-            current_mean = coeffs_a[j] * self.prev_emission_means[j] + coeffs_b * x_t
-            demeaned = (x_t - current_mean)
-            cov_mat = coeffs_a * self.prev_emission_covariances[j] + np.dot(coeffs_b[j] * demeaned.T, demeaned) + .01 * np.eye(D)
-            self.emission_density_objs[j] = multivariate_normal(mean=current_mean, cov=cov_mat)
-            emission_means.append(means)
-            emission_covariances.append(cov_mat)        
-        ''' Save previous values '''
-        self.prev_D_vector = self.current_D_vector
-        self.prev_alpha_vector = self.current_alpha_vector
-        self.prev_gamma_sums = self.current_gamma_sums
-        self.prev_emission_means = emission_means
-        self.prev_emission_covariances = emission_covariances
+                    self.current_xi_matrix[i][j] = (self.prev_alpha_vector[i] * self.get_emission_prob(j, x_t) * \
+                            self.trans_probs[i][j]) / self.current_alpha_vector.sum()
+            ''' A matrix update '''         
+            if self.t == 2:
+                for i in range(K):
+                    #self.current_D_vector[i] = self.current_xi_matrix[i,:].sum()
+                    self.current_D_vector[i] = np.sum([self.prev_alpha_vector[i] * \
+                                                       self.get_emission_prob(j, x_t) * \
+                                                       self.trans_probs[i][j] for j in range(K)])                    
+                self.current_D_vector += 1e-20                    
+                self.current_D_vector /= self.current_D_vector.sum()
+                print self.current_D_vector
+                for i in range(K):
+                    for j in range(K):
+                        self.trans_probs[i][j] = self.current_xi_matrix[i][j] / self.current_D_vector[i]
+            else:
+                amped_value = ((self.t - 1)**zeta - (self.t - 2)**zeta)
+                for i in range(K):
+                    self.current_D_vector[i] = amped_value + self.current_xi_matrix[i,:].sum() + self.prev_D_vector[i]
+                for i in range(K):
+                    for j in range(K):
+                        av = amped_value if i == j else 0.
+                        last_part = self.prev_D_vector[i] * self.trans_probs[i][j]
+                        new_A_matrix[i][j] = (self.current_xi_matrix[i][j] + av + last_part) / self.current_D_vector[i]
+                self.trans_probs = new_A_matrix
+            ''' Current gamma values '''
+            self.current_gamma_vector = self.current_alpha_vector[:] / self.current_alpha_vector.sum()
+            self.current_gamma_sums = self.current_gamma_vector + self.prev_gamma_sums
+            ''' Update emission parameters '''
+            coeffs_a = self.prev_gamma_sums / self.current_gamma_sums
+            coeffs_b = self.current_gamma_vector / self.current_gamma_sums                        
+            emission_means = []
+            emission_covariances = []
+            for j in range(K):
+                current_mean = coeffs_a[j] * self.prev_emission_means[j] + coeffs_b[j] * x_t
+                demeaned = (x_t - current_mean)
+                cov_mat = coeffs_a[j] * self.prev_emission_covariances[j] + np.dot(coeffs_b[j] * demeaned.T, demeaned) + .01 * np.eye(x_t.shape[0])
+                self.emission_density_objs[j] = multivariate_normal(mean=current_mean, cov=cov_mat)
+                emission_means.append(current_mean)
+                emission_covariances.append(cov_mat)        
+            ''' Save previous values '''
+            self.prev_D_vector = self.current_D_vector
+            self.prev_alpha_vector = self.current_alpha_vector
+            self.prev_gamma_sums = self.current_gamma_sums
+            self.prev_emission_means = emission_means
+            self.prev_emission_covariances = emission_covariances
         ''' Append data point to data buffer '''
         self.data_buffer.append(x_t)
 
-    def predict_state(self):
+    def predict_next(self):
         ''' Only predict if we have enough items in buffer '''
-        if len(data_buffer) < self.window_length:
-            return -1
+        if len(self.data_buffer) < self.window_width:
+            return None
         ''' Predict next position in data buffer '''
         sequence = np.array(self.data_buffer)
-        states = decode(sequence, self.previous_state)
+        states = self.decode(sequence, self.previous_state)
         self.previous_state = states[0]
         ''' Remove predicted data item off of front of data buffer '''
         self.data_buffer.pop(0)
-        return states[0]
+        return (states[0], self.t - (len(self.data_buffer) + 1))
 
     def increment_and_predict_state(self, x_t, zeta=1.0):
         self.increment(x_t, zeta)
@@ -437,12 +445,12 @@ if __name__ == "__main__":
     data[1500:, :] = 2.
 
     ''' Regularization modes and parameter '''
-    rgzn_modes = GaussianHMM.RgznModes()
+    rgzn_modes = InertialHMM.RgznModes()
     zeta = 3.
 
     ''' Define two-state model, run it on observation data and find 
         maximally likely hidden states, subject to regularization. '''
     K = 2        
-    model1 = GaussianHMM(K, data, rgzn_modes.INERTIAL)
+    model1 = InertialHMM(K, data, rgzn_modes.INERTIAL)
     model1.learn(data, zeta=zeta)
     predicted_states = model1.decode(data)
