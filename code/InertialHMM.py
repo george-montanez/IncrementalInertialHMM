@@ -8,7 +8,7 @@ MIN_START_PROB = 1e-200
 MIN_TRANS_PROB = 1e-200
 MIN_ALPHA_BETA = 1e-250
 MIN_D2_VAL = 1e-200
-MIN_COV_VAL = 1e-2
+MIN_COV_VAL = 1e-3
 MAX_ITER = 10
 MIN_GINI = .5
 
@@ -46,7 +46,7 @@ class InertialHMM(object):
         self.log_likelihood = float('-inf')
         self.t = 0
         self.data_buffer = []
-        self.previous_state = -1
+        self.previous_state_path_masses = None
         self.window_width = window_width
 
     def get_random_start_and_trans_probs(self):
@@ -238,8 +238,8 @@ class InertialHMM(object):
     '''    Decode (Viterbi)    '''
     '''************************'''
       
-    def decode(self, sequence, previous_state=-1):
-        ''' Implements a modified Viterbi Algorithm '''
+    def decode(self, sequence):
+        ''' Implements Viterbi Algorithm '''
         T = len(sequence)
         K = self.num_states
         x = sequence
@@ -249,9 +249,6 @@ class InertialHMM(object):
         if not np.all(start_probs):
             start_probs += 1e-20
             start_probs /= start_probs.sum()
-        if previous_state != -1:
-            ''' make start probs mass the transition prob from previous state to new state '''
-            start_probs = self.trans_probs[previous_state][:] 
         for k in range(K):
             V_table[0][k] = self.get_log_emission_prob(k, x[0]) + np.log(start_probs[k])
         backpointers[0,:] = -1
@@ -265,7 +262,37 @@ class InertialHMM(object):
             state_path.insert(0, backpointers[t][state_path[0]])
         return state_path[1:]
 
-    '''************************'''        
+    def incremental_decode(self, sequence, prev_masses=None):
+        ''' Implements a modified Viterbi Algorithm '''
+        T = len(sequence)
+        K = self.num_states
+        x = sequence
+        V_table = np.zeros((T, K), dtype="float64")
+        backpointers = np.zeros((T, K), dtype="float64")        
+        if prev_masses is None:
+            start_probs = self.start_probs[:]
+            if not np.all(start_probs):
+                start_probs += 1e-20
+                start_probs /= start_probs.sum() 
+            for k in range(K):
+                V_table[0][k] = self.get_log_emission_prob(k, x[0]) + np.log(start_probs[k])
+        else:
+            for k in range(K):
+                log_emiss_p = self.get_log_emission_prob(k, x[0])
+                scores = [prev_masses[j] + np.log(self.trans_probs[j][k]) + log_emiss_p for j in range(K)]
+                V_table[0][k] = max(scores)                
+        backpointers[0,:] = -1
+        for t in range(1, T):
+            for k in range(K):
+                log_emiss_p = self.get_log_emission_prob(k, x[t])
+                scores = [(V_table[t-1][j] + np.log(self.trans_probs[j][k]) + log_emiss_p,  j) for j in range(K)]
+                V_table[t][k], backpointers[t][k] = max(scores)
+        state_path = [np.max(backpointers[-1,:])]
+        for t in range(backpointers.shape[0]-1, -1, -1):
+            state_path.insert(0, backpointers[t][state_path[0]])
+        return state_path[1:], V_table
+
+    '''************************'''
     '''          Learn         '''
     '''************************'''
 
@@ -297,8 +324,10 @@ class InertialHMM(object):
             self.update_start_probs()
             self.trans_update_method(sequence, zeta)
             self.update_emission_parameters(sequence)
-        ''' Get state of last element '''
-        self.previous_state = decode(sequence)[:-1]
+        ''' Save masses for incrementing '''
+        states, masses = self.incremental_decode(sequence)
+        self.previous_state_path_masses = masses[-1]
+
   
     def get_segments(self, state_assignments):
         segments = []
@@ -349,6 +378,7 @@ class InertialHMM(object):
         '''
         self.t += 1
         K = self.num_states
+        self.current_scaling_factor = 1.
         self.current_alpha_vector = np.zeros(K)
         self.current_xi_matrix = np.zeros(shape=(K,K))
         self.current_gamma_vector = np.zeros(K)
@@ -356,34 +386,34 @@ class InertialHMM(object):
         self.current_D_vector = np.zeros(K)
         new_A_matrix = np.zeros(shape=(K,K))
         if self.t == 1:
+            print "Start Probs (361):", self.start_probs
             ''' Initialize values for T=1 step '''
             self.prev_alpha_vector = np.zeros(K)
             for j in range(K):
-                self.prev_alpha_vector[j] = self.start_probs[j] * self.get_emission_prob(j, x_t)
+                self.prev_alpha_vector[j] = self.start_probs[j] * self.get_emission_prob(j, x_t) + MIN_ALPHA_BETA
+            scaling_factor = self.prev_alpha_vector[:].sum()  
+            self.prev_alpha_vector /= scaling_factor
+            print self.prev_alpha_vector
             self.prev_gamma_sums = np.zeros(K)
         else: 
-            ''' Current alpha values '''
+            ''' Current alpha-hat values '''
             for j in range(K):
                 self.current_alpha_vector[j] = np.sum([self.prev_alpha_vector[i] * self.trans_probs[i][j] for i in range(K)]) * \
-                        self.get_emission_prob(j, x_t)
+                        self.get_emission_prob(j, x_t) + MIN_ALPHA_BETA
+            self.current_scaling_factor = self.current_alpha_vector.sum() 
+            self.current_alpha_vector /= self.current_scaling_factor
             ''' Current Xi values '''
             for i in range(K):
                 for j in range(K):
-                    self.current_xi_matrix[i][j] = (self.prev_alpha_vector[i] * self.get_emission_prob(j, x_t) * \
-                            self.trans_probs[i][j]) / self.current_alpha_vector.sum()
-            ''' A matrix update '''         
+                    self.current_xi_matrix[i][j] = (self.prev_alpha_vector[i] * self.get_emission_prob(j, x_t) * self.trans_probs[i][j])
+                    self.current_xi_matrix[i][j] /= self.current_scaling_factor
+            ''' A matrix update '''
             if self.t == 2:
-                for i in range(K):
-                    #self.current_D_vector[i] = self.current_xi_matrix[i,:].sum()
-                    self.current_D_vector[i] = np.sum([self.prev_alpha_vector[i] * \
-                                                       self.get_emission_prob(j, x_t) * \
-                                                       self.trans_probs[i][j] for j in range(K)])                    
-                self.current_D_vector += 1e-20                    
-                self.current_D_vector /= self.current_D_vector.sum()
-                print self.current_D_vector
-                for i in range(K):
+                for i in range(K): 
+                    print self.current_xi_matrix[i,:], self.current_xi_matrix[i,:].sum()
                     for j in range(K):
-                        self.trans_probs[i][j] = self.current_xi_matrix[i][j] / self.current_D_vector[i]
+                        self.trans_probs[i][j] = self.current_xi_matrix[i][j] / self.current_xi_matrix[i,:].sum()
+                self.smooth_transition_probs()
             else:
                 amped_value = ((self.t - 1)**zeta - (self.t - 2)**zeta)
                 for i in range(K):
@@ -394,8 +424,9 @@ class InertialHMM(object):
                         last_part = self.prev_D_vector[i] * self.trans_probs[i][j]
                         new_A_matrix[i][j] = (self.current_xi_matrix[i][j] + av + last_part) / self.current_D_vector[i]
                 self.trans_probs = new_A_matrix
+                self.smooth_transition_probs()
             ''' Current gamma values '''
-            self.current_gamma_vector = self.current_alpha_vector[:] / self.current_alpha_vector.sum()
+            self.current_gamma_vector = self.current_alpha_vector[:]
             self.current_gamma_sums = self.current_gamma_vector + self.prev_gamma_sums
             ''' Update emission parameters '''
             coeffs_a = self.prev_gamma_sums / self.current_gamma_sums
@@ -405,7 +436,7 @@ class InertialHMM(object):
             for j in range(K):
                 current_mean = coeffs_a[j] * self.prev_emission_means[j] + coeffs_b[j] * x_t
                 demeaned = (x_t - current_mean)
-                cov_mat = coeffs_a[j] * self.prev_emission_covariances[j] + np.dot(coeffs_b[j] * demeaned.T, demeaned) + .01 * np.eye(x_t.shape[0])
+                cov_mat = coeffs_a[j] * self.prev_emission_covariances[j] + np.dot(coeffs_b[j] * demeaned.T, demeaned) + MIN_COV_VAL * np.eye(x_t.shape[0])
                 self.emission_density_objs[j] = multivariate_normal(mean=current_mean, cov=cov_mat)
                 emission_means.append(current_mean)
                 emission_covariances.append(cov_mat)        
@@ -424,8 +455,10 @@ class InertialHMM(object):
             return None
         ''' Predict next position in data buffer '''
         sequence = np.array(self.data_buffer)
-        states = self.decode(sequence, self.previous_state)
-        self.previous_state = states[0]
+        prev_masses = self.previous_state_path_masses
+        states, masses = self.incremental_decode(sequence, prev_masses)
+        #print "States (458):", states
+        self.previous_state_path_masses = masses[0]
         ''' Remove predicted data item off of front of data buffer '''
         self.data_buffer.pop(0)
         return (states[0], self.t - (len(self.data_buffer) + 1))

@@ -20,7 +20,7 @@ def learn_initial_model(data, K):
     return model, final_param
 
 def learn_initial_model_quick(data, K):
-    final_param = 10.
+    final_param = 3.
     model = InertialHMM(K, data, rgzn_modes.MAP_SCALE_FREE)    
     model.learn(data, zeta=final_param, init=True)
     return model, final_param
@@ -33,23 +33,23 @@ def do_quantitative(results_dir = "../results/"):
     suffix = "INC_INERTIAL"
     i = 0
     INIT_DATA_LEN = 10000
-    while i < 2:
+    while i < 10:
         #try:
         if True:
             print "Attempting:", i
             data = np.loadtxt(DATA_DIR + RD_DATA_FILE_PATTERN % i, delimiter=" ")
-            true_states = np.loadtxt(DATA_DIR + RD_LABEL_FILE_PATTERN % i, dtype="int8", delimiter=" ")[:INIT_DATA_LEN]
+            true_states = np.loadtxt(DATA_DIR + RD_LABEL_FILE_PATTERN % i, dtype="int8", delimiter=" ")
             true_states -= np.min(true_states)
-            print len(true_states)
             K = len(set(true_states))
-            model, zeta = learn_initial_model(data[-INIT_DATA_LEN:], K)
+            model, zeta = learn_initial_model_quick(data[:INIT_DATA_LEN], K)
             predicted_states = []
             while len(predicted_states) < len(data) - INIT_DATA_LEN:
-                model.increment(data[model.t], zeta)
+                model.increment(data[model.t + INIT_DATA_LEN], zeta)
                 res = model.predict_next()
+                print res
                 if not res is None:
                     predicted_states.append(res[0])
-                    print res[0], true_states[model.t-1]
+                    print model.t, res[0], true_states[model.t-1]
             #visualize_results(data, np.array(predicted_states), true_states, K, 'MAP_PARAM_FREE_results_%s_%0.2f_%d_states' % ('fake', 5., K), save_figs=False)
             pt = np.hstack((np.array(predicted_states).reshape((-1,1)), np.array(true_states).reshape((-1,1))))
             np.savetxt(evaluation_dir + "./%s_%d_indv_predictions.txt" % (suffix, i), pt, fmt="%d")
